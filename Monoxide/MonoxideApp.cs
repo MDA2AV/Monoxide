@@ -56,6 +56,17 @@ public sealed class MonoxideApp
     /// <summary>Async fallback handler.</summary>
     public MonoxideApp MapFallback(MonoxideAsyncHandler handler) { _fallback = handler; return this; }
 
+    /// <summary>
+    /// Serves files under <paramref name="directory"/> at <paramref name="mountPrefix"/> (e.g. "/static"),
+    /// backed by ioxide.file: per-file baked native responses + precompressed (.br/.gz) negotiation.
+    /// </summary>
+    public MonoxideApp MapStatic(string mountPrefix, string directory)
+    {
+        mountPrefix = "/" + mountPrefix.Trim('/');          // normalise to "/static"
+        var statics = new MonoxideStatic(mountPrefix, directory);
+        return MapGet(mountPrefix + "/", statics.Handle);   // trailing '/' → prefix match
+    }
+
     /// <summary>Per-reactor startup hook — register ring-native, per-reactor services here (db pools, etc.).</summary>
     public MonoxideApp OnReactorStart(Action<Reactor> hook) { _onReactorStart = hook; return this; }
 

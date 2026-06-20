@@ -78,6 +78,9 @@ public sealed class MonoxideContext
     /// <summary>True when the client's Accept-Encoding lists brotli ("br").</summary>
     public bool AcceptsBrotli => TryHeader("accept-encoding"u8, out ReadOnlySpan<byte> v) && v.IndexOf("br"u8) >= 0;
 
+    /// <summary>True when the client's Accept-Encoding lists gzip.</summary>
+    public bool AcceptsGzip => TryHeader("accept-encoding"u8, out ReadOnlySpan<byte> v) && v.IndexOf("gzip"u8) >= 0;
+
     /// <summary>Looks up a header by name (case-insensitive).</summary>
     public bool TryHeader(ReadOnlySpan<byte> name, out ReadOnlySpan<byte> value)
     {
@@ -152,6 +155,27 @@ public sealed class MonoxideContext
         AppendOut(statusText);
         AppendOut("\r\nContent-Length: 0\r\n"u8);
         AppendOut(Close ? "Connection: close\r\n\r\n"u8 : "\r\n"u8);
+    }
+
+    // Appends an already-framed response (status + headers + body) verbatim — used by static serving to
+    // write ioxide.file's baked native response straight through the slab path.
+    internal void WriteRaw(ReadOnlySpan<byte> bakedResponse) => AppendOut(bakedResponse);
+
+    // Frames a static 200 with an explicit content-type, optional content-encoding (+ Vary), and a body.
+    internal void WriteStatic(ReadOnlySpan<byte> contentType, ReadOnlySpan<byte> encoding, ReadOnlySpan<byte> body)
+    {
+        AppendOut("HTTP/1.1 200 OK\r\nContent-Type: "u8);
+        AppendOut(contentType);
+        if (!encoding.IsEmpty)
+        {
+            AppendOut("\r\nContent-Encoding: "u8);
+            AppendOut(encoding);
+            AppendOut("\r\nVary: Accept-Encoding"u8);
+        }
+        AppendOut("\r\nContent-Length: "u8);
+        AppendOutLong(body.Length);
+        AppendOut(Close ? "\r\nConnection: close\r\n\r\n"u8 : "\r\n\r\n"u8);
+        AppendOut(body);
     }
 
     // ──────────────────────────────── internals ────────────────────────────────

@@ -45,14 +45,20 @@ internal static class Program
             BufferRingEntries = 256,
         };
 
-        Console.WriteLine($"[monoxide] {reactors} reactors on :{port} (dataset={_ds.Count} items)");
-
-        MonoxideApp.Create(config)
+        MonoxideApp app = MonoxideApp.Create(config)
             .MapGet("/pipeline", static ctx => ctx.Text("ok"u8))
             .MapGet("/json/{count}", Json)     // path param /json/<count>?m=<mult>; brotli on Accept-Encoding: br
-            .MapPost("/upload", Upload)        // POST body byte count
-            .MapFallback(Baseline)             // /baseline11, /, and anything else → a + b + body
-            .Run();
+            .MapPost("/upload", Upload);       // POST body byte count
+
+        string staticRoot = Environment.GetEnvironmentVariable("IOXIDE_STATIC") ?? "/data/static";
+        bool hasStatic = Directory.Exists(staticRoot);
+        if (hasStatic)
+            app.MapStatic("/static", staticRoot);   // ioxide.file-backed, precompressed-aware
+
+        app.MapFallback(Baseline);             // /baseline11, /, and anything else → a + b + body
+
+        Console.WriteLine($"[monoxide] {reactors} reactors on :{port} (dataset={_ds.Count} items, static={(hasStatic ? "on" : "off")})");
+        app.Run();
 
         return 0;
     }
