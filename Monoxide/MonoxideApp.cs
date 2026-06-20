@@ -23,7 +23,7 @@ public sealed class MonoxideApp
 {
     private readonly ServerConfig _config;
     private readonly List<Route> _routes = [];
-    private MonoxideHandler? _fallback;
+    private MonoxideAsyncHandler? _fallback;
     private Action<Reactor>? _onReactorStart;
     private ParserLimits _limits = ParserLimits.Default;
 
@@ -32,17 +32,29 @@ public sealed class MonoxideApp
     /// <summary>Creates an app with the given engine config (or a sensible default).</summary>
     public static MonoxideApp Create(ServerConfig? config = null) => new(config ?? Defaults());
 
-    /// <summary>Maps a GET route. A path ending in '/' is a prefix match (e.g. "/json/" matches "/json/5").</summary>
-    public MonoxideApp MapGet(string path, MonoxideHandler handler) => Map(Verb.Get, path, handler);
+    /// <summary>Maps a GET route. A trailing '/' prefix-matches; "{name}" captures the trailing segment (e.g. "/json/{count}").</summary>
+    public MonoxideApp MapGet(string path, MonoxideHandler handler) => Map(Verb.Get, path, Wrap(handler));
 
-    /// <summary>Maps a POST route. A path ending in '/' is a prefix match.</summary>
-    public MonoxideApp MapPost(string path, MonoxideHandler handler) => Map(Verb.Post, path, handler);
+    /// <summary>Maps an async GET route — for handlers that await (DB, cache, upstream).</summary>
+    public MonoxideApp MapGet(string path, MonoxideAsyncHandler handler) => Map(Verb.Get, path, handler);
 
-    /// <summary>Maps a PUT route. A path ending in '/' is a prefix match.</summary>
-    public MonoxideApp MapPut(string path, MonoxideHandler handler) => Map(Verb.Put, path, handler);
+    /// <summary>Maps a POST route. A trailing '/' prefix-matches; "{name}" captures the trailing segment.</summary>
+    public MonoxideApp MapPost(string path, MonoxideHandler handler) => Map(Verb.Post, path, Wrap(handler));
+
+    /// <summary>Maps an async POST route.</summary>
+    public MonoxideApp MapPost(string path, MonoxideAsyncHandler handler) => Map(Verb.Post, path, handler);
+
+    /// <summary>Maps a PUT route. A trailing '/' prefix-matches; "{name}" captures the trailing segment.</summary>
+    public MonoxideApp MapPut(string path, MonoxideHandler handler) => Map(Verb.Put, path, Wrap(handler));
+
+    /// <summary>Maps an async PUT route.</summary>
+    public MonoxideApp MapPut(string path, MonoxideAsyncHandler handler) => Map(Verb.Put, path, handler);
 
     /// <summary>Handler for any request no mapped route matched (e.g. the baseline sum / a 404 page).</summary>
-    public MonoxideApp MapFallback(MonoxideHandler handler) { _fallback = handler; return this; }
+    public MonoxideApp MapFallback(MonoxideHandler handler) { _fallback = Wrap(handler); return this; }
+
+    /// <summary>Async fallback handler.</summary>
+    public MonoxideApp MapFallback(MonoxideAsyncHandler handler) { _fallback = handler; return this; }
 
     /// <summary>Per-reactor startup hook — register ring-native, per-reactor services here (db pools, etc.).</summary>
     public MonoxideApp OnReactorStart(Action<Reactor> hook) { _onReactorStart = hook; return this; }
@@ -50,10 +62,20 @@ public sealed class MonoxideApp
     /// <summary>Overrides the Glyph11 parser limits (header counts/sizes, URL length, ...).</summary>
     public MonoxideApp WithParserLimits(ParserLimits limits) { _limits = limits; return this; }
 
-    private MonoxideApp Map(Verb verb, string path, MonoxideHandler handler)
+    // A sync handler is wrapped once here (at map time, never per request) into the async form the loop
+    // awaits; it returns a completed ValueTask, so the await finishes synchronously with no allocation.
+    private static MonoxideAsyncHandler Wrap(MonoxideHandler sync) => ctx => { sync(ctx); return default; };
+
+    private MonoxideApp Map(Verb verb, string path, MonoxideAsyncHandler handler)
     {
-        bool prefix = path.Length > 1 && path[^1] == '/';
-        _routes.Add(new Route(verb, System.Text.Encoding.ASCII.GetBytes(path), prefix, handler));
+        // "/json/{count}" → literal "/json/" (prefix-matched); the trailing segment is captured as the param.
+        int brace = path.IndexOf('{');
+        bool hasParam = brace >= 0;
+        string literal = hasParam ? path[..brace] : path;
+        bool prefix = hasParam || (literal.Length > 1 && literal[^1] == '/');
+        byte[] lit = System.Text.Encoding.ASCII.GetBytes(literal);
+        int paramStart = hasParam ? lit.Length : -1;
+        _routes.Add(new Route(verb, lit, prefix, paramStart, handler));
         return this;
     }
 

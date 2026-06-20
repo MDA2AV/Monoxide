@@ -1,4 +1,5 @@
 using System.Buffers.Text;
+using System.IO.Compression;
 
 using Glyph11.Protocol;
 
@@ -30,11 +31,17 @@ public sealed class MonoxideContext
     // Holds a decoded chunked body (Content-Length bodies are viewed in-place in Carry instead).
     internal byte[] BodyBuf = new byte[4 * 1024];
 
+    // Per-request brotli output for JsonBrotli (Content-Encoding: br).
+    private byte[] _br = new byte[16 * 1024];
+
     /// <summary>True when the client asked to close after this request (Connection: close).</summary>
     internal bool Close;
 
     /// <summary>Set by a handler/loop to end the connection after the in-flight response is flushed.</summary>
     internal bool WantClose;
+
+    // Byte offset of a captured route {param} within Path (set by the loop from the matched route), or -1.
+    internal int ParamStart = -1;
 
     /// <summary>The request body bytes (Content-Length view or decoded chunked payload). Empty if none.</summary>
     public ReadOnlyMemory<byte> Body { get; internal set; }
@@ -57,6 +64,19 @@ public sealed class MonoxideContext
         value = default;
         return false;
     }
+
+    /// <summary>The captured trailing route parameter (e.g. "5" for "/json/{count}" matching "/json/5").</summary>
+    public ReadOnlySpan<byte> RouteParam => ParamStart >= 0 ? Path[ParamStart..] : default;
+
+    /// <summary>Parses the captured route parameter as an int (the whole captured segment must be digits).</summary>
+    public bool TryRouteInt(out int value)
+    {
+        ReadOnlySpan<byte> p = RouteParam;
+        return Utf8Parser.TryParse(p, out value, out int used) && used == p.Length && p.Length > 0;
+    }
+
+    /// <summary>True when the client's Accept-Encoding lists brotli ("br").</summary>
+    public bool AcceptsBrotli => TryHeader("accept-encoding"u8, out ReadOnlySpan<byte> v) && v.IndexOf("br"u8) >= 0;
 
     /// <summary>Looks up a header by name (case-insensitive).</summary>
     public bool TryHeader(ReadOnlySpan<byte> name, out ReadOnlySpan<byte> value)
@@ -108,6 +128,23 @@ public sealed class MonoxideContext
         _scratchLen = 0;
     }
 
+    /// <summary>
+    /// Frames the body scratch as a brotli-compressed <c>application/json</c> 200 response
+    /// (<c>Content-Encoding: br</c>) — for clients that sent <c>Accept-Encoding: br</c>.
+    /// </summary>
+    public void JsonBrotli()
+    {
+        int max = BrotliEncoder.GetMaxCompressedLength(_scratchLen);
+        if (_br.Length < max) Array.Resize(ref _br, Math.Max(max, _br.Length * 2));
+        BrotliEncoder.TryCompress(_scratch.AsSpan(0, _scratchLen), _br, out int written, quality: 1, window: 22);
+
+        AppendOut("HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Encoding: br\r\nContent-Length: "u8);
+        AppendOutLong(written);
+        AppendOut(Close ? "\r\nConnection: close\r\n\r\n"u8 : "\r\n\r\n"u8);
+        AppendOut(_br.AsSpan(0, written));
+        _scratchLen = 0;
+    }
+
     /// <summary>Writes a bare status response with <c>Content-Length: 0</c>, e.g. <c>Status("404 Not Found"u8)</c>.</summary>
     public void Status(ReadOnlySpan<byte> statusText)
     {
@@ -146,6 +183,7 @@ public sealed class MonoxideContext
         _scratchLen = 0;
         Body = default;
         Close = false;
+        ParamStart = -1;
     }
 
     internal void ResetForConnection()

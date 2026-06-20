@@ -15,9 +15,6 @@ namespace Monoxide;
 /// </summary>
 internal static class ConnectionLoop
 {
-    // Compile-time debug trace flag — branches under it are elided in Release (zero hot-path cost).
-    private const bool Trace = false;
-
     // One context pool per reactor. ioxide resumes IValueTaskSource continuations inline on the
     // reactor thread, so each reactor only ever touches its own [ThreadStatic] stack — no locks.
     [ThreadStatic] private static Stack<MonoxideContext>? _pool;
@@ -61,7 +58,7 @@ internal static class ConnectionLoop
                     conn.ResetRead();
 
                 // Serve every complete request currently in the carry (handles pipelining + fragmentation).
-                carryLen = ParseAll(ctx, router, carryLen, limits);
+                carryLen = await ParseAll(ctx, router, carryLen, limits);
 
                 if (closed)
                     ctx.WantClose = true;
@@ -98,7 +95,7 @@ internal static class ConnectionLoop
 
     // Parse + dispatch every complete request in carry[0..carryLen]; returns the leftover length
     // (any trailing partial request is compacted to the front of the carry for the next read).
-    private static int ParseAll(MonoxideContext ctx, FrozenRouter router, int carryLen, ParserLimits limits)
+    private static async ValueTask<int> ParseAll(MonoxideContext ctx, FrozenRouter router, int carryLen, ParserLimits limits)
     {
         byte[] carry = ctx.Carry;
         int offset = 0;
@@ -111,19 +108,14 @@ internal static class ConnectionLoop
             try
             {
                 if (!UltraHardenedParser.TryExtractFullHeaderROM(ref mem, ctx.Req, in limits, out int bytesRead))
-                {
-                    if (Trace) Console.Error.WriteLine($"[parse] offset={offset}/{carryLen} INCOMPLETE header");
                     break;   // header not complete yet — wait for the next read
-                }
 
                 int bodyStart = offset + bytesRead + 1;
-                if (Trace) Console.Error.WriteLine($"[parse] offset={offset}/{carryLen} bytesRead={bytesRead} method={System.Text.Encoding.ASCII.GetString(ctx.Req.Method.Span)} path={System.Text.Encoding.ASCII.GetString(ctx.Req.Path.Span)} bodyStart={bodyStart}");
                 if (!TryResolveBody(ctx, carryLen, bodyStart, out int nextOffset, out bool needMore))
                 {
                     if (needMore)
                         break;   // body not complete yet — wait
-                    // malformed framing
-                    ctx.Status("400 Bad Request"u8);
+                    ctx.Status("400 Bad Request"u8);   // malformed framing
                     ctx.WantClose = true;
                     offset = carryLen;
                     break;
@@ -131,16 +123,18 @@ internal static class ConnectionLoop
 
                 ctx.Close = WantsClose(ctx);
 
-                MonoxideHandler? handler = router.Match(ctx.Req.Method.Span, ctx.Req.Path.Span);
+                // Resolve the handler + any captured {param} up front — no span survives the await below.
+                MonoxideAsyncHandler? handler = router.Match(ctx.Req.Method.Span, ctx.Req.Path.Span, out int paramStart);
+                ctx.ParamStart = paramStart;
+
                 if (handler is not null)
-                    handler(ctx);
+                    await handler(ctx);   // synchronous for sync routes; truly suspends only for async ones
                 else
                     ctx.Status("404 Not Found"u8);
 
                 if (ctx.Close)
                     ctx.WantClose = true;
 
-                if (Trace) Console.Error.WriteLine($"[parse]   -> handled, nextOffset={nextOffset} close={ctx.Close} outLen={ctx.OutLen}");
                 offset = nextOffset;
             }
             catch (HttpParseException ex)
