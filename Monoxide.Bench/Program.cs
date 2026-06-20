@@ -49,7 +49,8 @@ internal static class Program
 
         MonoxideApp.Create(config)
             .MapGet("/pipeline", static ctx => ctx.Text("ok"u8))
-            .MapGet("/json/", Json)            // prefix: matches /json/<count>
+            .MapGet("/json/{count}", Json)     // path param /json/<count>?m=<mult>; brotli on Accept-Encoding: br
+            .MapPost("/upload", Upload)        // POST body byte count
             .MapFallback(Baseline)             // /baseline11, /, and anything else → a + b + body
             .Run();
 
@@ -59,9 +60,7 @@ internal static class Program
     // GET /json/{count}?m={mult} → {"items":[...],"count":N}, total = price*quantity*m.
     private static void Json(MonoxideContext ctx)
     {
-        ReadOnlySpan<byte> tail = ctx.Path[6..];   // after "/json/"
-        if (!Utf8Parser.TryParse(tail, out int count, out int used) || used != tail.Length
-            || count < 1 || count > _ds.Count)
+        if (!ctx.TryRouteInt(out int count) || count < 1 || count > _ds.Count)
         {
             ctx.Status("404 Not Found"u8);
             return;
@@ -94,7 +93,17 @@ internal static class Program
         }
         ctx.Append("],\"count\":"u8); ctx.AppendInt(count);
         ctx.Append("}"u8);
-        ctx.Json();
+
+        if (ctx.AcceptsBrotli) ctx.JsonBrotli();
+        else ctx.Json();
+    }
+
+    // POST /upload → text/plain decimal of the received body byte count (the loop frames the body).
+    private static void Upload(MonoxideContext ctx)
+    {
+        Span<byte> num = stackalloc byte[16];
+        Utf8Formatter.TryFormat(ctx.Body.Length, num, out int n);
+        ctx.Text(num[..n]);
     }
 
     // GET/POST /baseline11?a=&b= (and any unmatched path, e.g. POST /) → text/plain decimal a+b+body.
