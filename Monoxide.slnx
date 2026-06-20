@@ -1,0 +1,4 @@
+<Solution>
+  <Project Path="Monoxide/Monoxide.csproj" />
+  <Project Path="Monoxide.Bench/Monoxide.Bench.csproj" />
+</Solution>
